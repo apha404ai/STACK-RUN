@@ -89,7 +89,7 @@
 <div class="shell">
   <header class="topbar">
     <div class="brand"><span class="brand-icon">▦</span><div><strong>STACK RUN</strong><small>MINI BLOCK ARCADE</small></div></div>
-    <div class="top-right"><button class="icon-btn" id="sound" aria-label="Toggle sound" title="Sound">♪</button><button class="icon-btn" id="pause" aria-label="Pause or resume game" title="Pause">Ⅱ</button></div>
+    <div class="top-right"><button class="icon-btn" id="sound" aria-label="Mute music and sounds" aria-pressed="true" title="Music and sounds">♫</button><button class="icon-btn" id="pause" aria-label="Pause or resume game" title="Pause">Ⅱ</button></div>
   </header>
   <section class="stats" aria-label="Game statistics">
     <div class="stat"><div class="stat-label">SCORE</div><div id="score" class="stat-value">0</div></div>
@@ -143,22 +143,80 @@
  const COLORS = {I:'#70caba',O:'#f9ca61',T:'#aa8dea',S:'#9bcf81',Z:'#f0768e',J:'#79a9ec',L:'#fa9a60'};
  let board, piece, bag=[], nextType, held=null, usedHold=false;
  let score=0, best=0, lines=0, level=1, status='ready', lastTime=0, fallTime=0, softHeld=false;
- let animationFrame=0, soundOn=false, audio=null, toastTimer=0, flash=0;
+ let animationFrame=0, soundOn=true, audio=null, toastTimer=0, flash=0;
+ // Self-contained, very quiet four-chord background loop synthesized with Web Audio.
+ // It starts after a user action for iOS and X in-app browser compatibility.
+ const MUSIC_NOTES=[57,64,60,64,57,64,60,72,53,60,57,60,53,60,57,69,
+                    48,55,60,55,48,55,60,67,55,62,59,62,55,62,59,67];
+ const MUSIC_BASS=[45,41,36,43];
+ const NOTE_INTERVAL=.33;
+ let musicBus=null, musicTimer=null, musicStep=0, nextNote=0;
+ try { soundOn=localStorage.getItem('stack-run-audio-v1')!=='off'; } catch (_) {}
  try { best=Number(localStorage.getItem('stack-run-best-v1')) || 0; } catch (_) {}
  $('best').textContent=best.toLocaleString('en-US');
 
- function beep(freq=440, duration=.07, type='square') {
-   if(!soundOn)return;
+ function ensureAudio() {
    try {
      if(!audio) audio=new (window.AudioContext||window.webkitAudioContext)();
-     if(audio.state==='suspended') audio.resume();
+     if(audio.state==='suspended') audio.resume().catch(()=>{});
+     return audio;
+   } catch (_) { return null; }
+ }
+ function beep(freq=440, duration=.07, type='square') {
+   if(!soundOn || !ensureAudio())return;
+   try {
      const oscillator=audio.createOscillator(), gain=audio.createGain();
      oscillator.type=type; oscillator.frequency.value=freq;
-     gain.gain.setValueAtTime(.025,audio.currentTime);
-     gain.gain.exponentialRampToValueAtTime(.001,audio.currentTime+duration);
+     gain.gain.setValueAtTime(.018,audio.currentTime);
+     gain.gain.exponentialRampToValueAtTime(.0001,audio.currentTime+duration);
      oscillator.connect(gain); gain.connect(audio.destination);
      oscillator.start(); oscillator.stop(audio.currentTime+duration);
    } catch (_) {}
+ }
+ function musicTone(midi, when, bass=false) {
+   const osc=audio.createOscillator(), envelope=audio.createGain();
+   osc.type=bass?'sine':'triangle';
+   osc.frequency.setValueAtTime(440*Math.pow(2,(midi-69)/12),when);
+   const end=when+(bass?1.12:.45);
+   envelope.gain.setValueAtTime(.0001,when);
+   envelope.gain.exponentialRampToValueAtTime(bass?.008:.012,when+.028);
+   envelope.gain.exponentialRampToValueAtTime(.0001,end);
+   osc.connect(envelope);envelope.connect(musicBus);
+   osc.start(when);osc.stop(end+.02);
+ }
+ function scheduleMusic() {
+   if(!soundOn || status!=='playing' || !audio || audio.state!=='running')return;
+   while(nextNote<audio.currentTime+.25) {
+     const n=musicStep%MUSIC_NOTES.length;
+     musicTone(MUSIC_NOTES[n],nextNote);
+     if(n%8===0)musicTone(MUSIC_BASS[Math.floor(n/8)],nextNote,true);
+     musicStep++;
+     nextNote+=NOTE_INTERVAL;
+   }
+ }
+ function startMusic() {
+   if(!soundOn || status!=='playing' || musicTimer!==null || !ensureAudio())return;
+   if(!musicBus) { musicBus=audio.createGain();musicBus.connect(audio.destination); }
+   musicBus.gain.cancelScheduledValues(audio.currentTime);
+   musicBus.gain.setTargetAtTime(.85,audio.currentTime,.05);
+   nextNote=audio.currentTime+.07;
+   scheduleMusic();
+   musicTimer=setInterval(scheduleMusic,100);
+ }
+ function stopMusic() {
+   if(musicTimer!==null){clearInterval(musicTimer);musicTimer=null;}
+   if(audio && musicBus){
+     musicBus.gain.cancelScheduledValues(audio.currentTime);
+     musicBus.gain.setTargetAtTime(.0001,audio.currentTime,.04);
+   }
+ }
+ function updateSoundButton() {
+   const button=$('sound');
+   button.textContent=soundOn?'♫':'♩';
+   button.classList.toggle('sound-off',!soundOn);
+   button.setAttribute('aria-pressed',String(soundOn));
+   button.setAttribute('aria-label',soundOn?'Mute music and sounds':'Enable music and sounds');
+   button.title=soundOn?'Mute music':'Play music';
  }
  function toast(s) { const e=$('toast');e.textContent=s;e.classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>e.classList.remove('visible'),900); }
  function fetchType() {
@@ -181,10 +239,11 @@
    if(collides()) gameOver();
  }
  function resetGame(){
+   stopMusic();musicStep=0;
    board=Array.from({length:R},()=>Array(C).fill(null));bag=[];nextType=fetchType();held=null;usedHold=false;
    score=0;lines=0;level=1;fallTime=0;flash=0;softHeld=false;
    status='playing';lastTime=performance.now();
-   newPiece();updateStats();hideOverlay();$('pause').textContent='Ⅱ';beep(540,.12);
+   newPiece();updateStats();hideOverlay();$('pause').textContent='Ⅱ';beep(540,.12);startMusic();
    if(!animationFrame) animationFrame=requestAnimationFrame(tick);
  }
  function updateStats(){
@@ -255,10 +314,10 @@
    }
  }
  function hideOverlay(){$('overlay').classList.add('hidden');}
- function gameOver(){status='over';saveBest();updateStats();showOverlay('over');$('pause').textContent='Ⅱ';beep(150,.25,'sawtooth');}
+ function gameOver(){status='over';stopMusic();saveBest();updateStats();showOverlay('over');$('pause').textContent='Ⅱ';beep(150,.25,'sawtooth');}
  function togglePause(){
-   if(status==='playing'){status='paused';softHeld=false;showOverlay('pause');$('pause').textContent='▶';}
-   else if(status==='paused'){status='playing';lastTime=performance.now();hideOverlay();$('pause').textContent='Ⅱ';if(!animationFrame)animationFrame=requestAnimationFrame(tick);}
+   if(status==='playing'){status='paused';stopMusic();softHeld=false;showOverlay('pause');$('pause').textContent='▶';}
+   else if(status==='paused'){status='playing';lastTime=performance.now();hideOverlay();$('pause').textContent='Ⅱ';startMusic();if(!animationFrame)animationFrame=requestAnimationFrame(tick);}
  }
  function playAction(){if(status==='paused')togglePause();else resetGame();}
  function fillBlock(c,x,y,s,ghost=false){
@@ -311,8 +370,8 @@
  }
  $('play').addEventListener('click',playAction);
  $('pause').addEventListener('click',()=>{if(status==='ready'||status==='over')return;togglePause();});
- $('sound').addEventListener('click',()=>{soundOn=!soundOn;$('sound').classList.toggle('sound-off',!soundOn);$('sound').textContent=soundOn?'♪':'♩';beep(620,.08);});
- $('sound').classList.add('sound-off');
+ $('sound').addEventListener('click',()=>{soundOn=!soundOn;try{localStorage.setItem('stack-run-audio-v1',soundOn?'on':'off');}catch(_){}updateSoundButton();if(soundOn){beep(620,.08);startMusic();}else stopMusic();});
+ updateSoundButton();
  $('share-btn').addEventListener('click',share);
  $('hold-btn').addEventListener('click',hold);
  $('help').addEventListener('click',()=>{if(status==='playing')togglePause();toast('TAP TURN · SWIPE MOVE · DOWN DROP');});

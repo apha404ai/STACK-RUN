@@ -144,73 +144,88 @@
  let board, piece, bag=[], nextType, held=null, usedHold=false;
  let score=0, best=0, lines=0, level=1, status='ready', lastTime=0, fallTime=0, softHeld=false;
  let animationFrame=0, soundOn=true, audio=null, toastTimer=0, flash=0;
- // Self-contained, very quiet four-chord background loop synthesized with Web Audio.
- // It starts after a user action for iOS and X in-app browser compatibility.
- const MUSIC_NOTES=[57,64,60,64,57,64,60,72,53,60,57,60,53,60,57,69,
-                    48,55,60,55,48,55,60,67,55,62,59,62,55,62,59,67];
- const MUSIC_BASS=[45,41,36,43];
- const NOTE_INTERVAL=.33;
- let musicBus=null, musicTimer=null, musicStep=0, nextNote=0;
+ // Music is a small original looping synth track generated locally as WAV.
+ // Native HTML5 audio is more reliable than a continuously scheduled AudioContext in X on iOS.
+ let soundtrack=null;
  try { soundOn=localStorage.getItem('stack-run-audio-v1')!=='off'; } catch (_) {}
  try { best=Number(localStorage.getItem('stack-run-best-v1')) || 0; } catch (_) {}
  $('best').textContent=best.toLocaleString('en-US');
 
  function ensureAudio() {
    try {
-     if(!audio) audio=new (window.AudioContext||window.webkitAudioContext)();
-     if(audio.state==='suspended') audio.resume().catch(()=>{});
+     if(!audio)audio=new (window.AudioContext||window.webkitAudioContext)();
+     if(audio.state==='suspended')audio.resume().catch(()=>{});
      return audio;
-   } catch (_) { return null; }
+   }catch(_){return null;}
  }
- function beep(freq=440, duration=.07, type='square') {
-   if(!soundOn || !ensureAudio())return;
+ function beep(freq=440,duration=.07,type='square') {
+   if(!soundOn||!ensureAudio())return;
    try {
-     const oscillator=audio.createOscillator(), gain=audio.createGain();
-     oscillator.type=type; oscillator.frequency.value=freq;
-     gain.gain.setValueAtTime(.018,audio.currentTime);
+     const oscillator=audio.createOscillator(),gain=audio.createGain();
+     oscillator.type=type;oscillator.frequency.value=freq;
+     gain.gain.setValueAtTime(.021,audio.currentTime);
      gain.gain.exponentialRampToValueAtTime(.0001,audio.currentTime+duration);
-     oscillator.connect(gain); gain.connect(audio.destination);
-     oscillator.start(); oscillator.stop(audio.currentTime+duration);
-   } catch (_) {}
+     oscillator.connect(gain);gain.connect(audio.destination);
+     oscillator.start();oscillator.stop(audio.currentTime+duration);
+   }catch(_){}
  }
- function musicTone(midi, when, bass=false) {
-   const osc=audio.createOscillator(), envelope=audio.createGain();
-   osc.type=bass?'sine':'triangle';
-   osc.frequency.setValueAtTime(440*Math.pow(2,(midi-69)/12),when);
-   const end=when+(bass?1.12:.45);
-   envelope.gain.setValueAtTime(.0001,when);
-   envelope.gain.exponentialRampToValueAtTime(bass?.008:.012,when+.028);
-   envelope.gain.exponentialRampToValueAtTime(.0001,end);
-   osc.connect(envelope);envelope.connect(musicBus);
-   osc.start(when);osc.stop(end+.02);
- }
- function scheduleMusic() {
-   if(!soundOn || status!=='playing' || !audio || audio.state!=='running')return;
-   while(nextNote<audio.currentTime+.25) {
-     const n=musicStep%MUSIC_NOTES.length;
-     musicTone(MUSIC_NOTES[n],nextNote);
-     if(n%8===0)musicTone(MUSIC_BASS[Math.floor(n/8)],nextNote,true);
-     musicStep++;
-     nextNote+=NOTE_INTERVAL;
+ // 32-step gentle minor-key melody, airy background pad, bass underneath.
+ function makeTrack(){
+   const bpmStep=.38,steps=32,seconds=steps*bpmStep,rate=16000;
+   const melody=[69,72,76,72,69,72,76,79, 69,72,77,72,69,72,77,81,
+                 67,72,76,72,67,72,76,79, 67,71,74,71,67,71,74,79];
+   const bass=[45,41,48,43];
+   const chords=[[57,60,64],[53,57,60],[60,64,67],[55,59,62]];
+   const hz=m=>440*Math.pow(2,(m-69)/12);
+   const melodyFreq=melody.map(hz),bassFreq=bass.map(hz),padFreq=chords.map(ch=>ch.map(hz));
+   const frames=Math.round(seconds*rate),buffer=new ArrayBuffer(44+frames*2);
+   const view=new DataView(buffer);
+   const write=(at,str)=>{for(let i=0;i<str.length;i++)view.setUint8(at+i,str.charCodeAt(i));};
+   write(0,'RIFF');view.setUint32(4,36+frames*2,true);write(8,'WAVE');
+   write(12,'fmt ');view.setUint32(16,16,true);view.setUint16(20,1,true);
+   view.setUint16(22,1,true);view.setUint32(24,rate,true);view.setUint32(28,rate*2,true);
+   view.setUint16(32,2,true);view.setUint16(34,16,true);
+   write(36,'data');view.setUint32(40,frames*2,true);
+   const tau=Math.PI*2,barDuration=bpmStep*8;
+   for(let i=0;i<frames;i++){
+     const t=i/rate,step=Math.min(31,Math.floor(t/bpmStep)),bar=Math.floor(step/8);
+     const age=t-step*bpmStep,barAge=t-bar*barDuration;
+     const attack=Math.min(1,age/.02),fall=Math.exp(-3.2*age);
+     const phase=tau*melodyFreq[step]*age;
+     const lead=.23*attack*fall*(Math.sin(phase)+.18*Math.sin(phase*2));
+     const bassFade=Math.min(1,barAge/.07,Math.max(0,(barDuration-barAge)/.23));
+     const low=.13*bassFade*Math.sin(tau*bassFreq[bar]*barAge);
+     const padFade=Math.min(1,barAge/.24,Math.max(0,(barDuration-barAge)/.3));
+     const ch=padFreq[bar];
+     const pad=.02*padFade*(Math.sin(tau*ch[0]*barAge)+Math.sin(tau*ch[1]*barAge)+Math.sin(tau*ch[2]*barAge));
+     const edge=Math.min(1,t/.04,(seconds-t)/.04);
+     const sample=Math.max(-1,Math.min(1,(lead+low+pad)*edge));
+     view.setInt16(44+2*i,Math.round(sample*32767),true);
    }
+   return new Blob([buffer],{type:'audio/wav'});
+ }
+ function ensureSoundtrack(){
+   if(soundtrack)return soundtrack;
+   const el=document.createElement('audio');
+   el.setAttribute('playsinline','');el.loop=true;el.preload='auto';el.volume=.80;
+   el.src=URL.createObjectURL(makeTrack());
+   el.style.display='none';document.body.appendChild(el);
+   soundtrack=el;
+   return el;
  }
  function startMusic() {
-   if(!soundOn || status!=='playing' || musicTimer!==null || !ensureAudio())return;
-   if(!musicBus) { musicBus=audio.createGain();musicBus.connect(audio.destination); }
-   musicBus.gain.cancelScheduledValues(audio.currentTime);
-   musicBus.gain.setTargetAtTime(.85,audio.currentTime,.05);
-   nextNote=audio.currentTime+.07;
-   scheduleMusic();
-   musicTimer=setInterval(scheduleMusic,100);
+   if(!soundOn||status!=='playing')return;
+   try {
+     const playing=ensureSoundtrack().play();
+     if(playing&&playing.catch)playing.catch(()=>{
+       if(soundOn&&status==='playing')toast('TAP ♫ TO ENABLE MUSIC');
+     });
+   }catch(_){toast('TAP ♫ TO ENABLE MUSIC');}
  }
- function stopMusic() {
-   if(musicTimer!==null){clearInterval(musicTimer);musicTimer=null;}
-   if(audio && musicBus){
-     musicBus.gain.cancelScheduledValues(audio.currentTime);
-     musicBus.gain.setTargetAtTime(.0001,audio.currentTime,.04);
-   }
+ function stopMusic(){
+   if(soundtrack&&!soundtrack.paused)soundtrack.pause();
  }
- function updateSoundButton() {
+ function updateSoundButton(){
    const button=$('sound');
    button.textContent=soundOn?'♫':'♩';
    button.classList.toggle('sound-off',!soundOn);
@@ -239,7 +254,7 @@
    if(collides()) gameOver();
  }
  function resetGame(){
-   stopMusic();musicStep=0;
+   stopMusic();if(soundtrack)soundtrack.currentTime=0;
    board=Array.from({length:R},()=>Array(C).fill(null));bag=[];nextType=fetchType();held=null;usedHold=false;
    score=0;lines=0;level=1;fallTime=0;flash=0;softHeld=false;
    status='playing';lastTime=performance.now();
@@ -372,6 +387,7 @@
  $('pause').addEventListener('click',()=>{if(status==='ready'||status==='over')return;togglePause();});
  $('sound').addEventListener('click',()=>{soundOn=!soundOn;try{localStorage.setItem('stack-run-audio-v1',soundOn?'on':'off');}catch(_){}updateSoundButton();if(soundOn){beep(620,.08);startMusic();}else stopMusic();});
  updateSoundButton();
+ ensureSoundtrack();
  $('share-btn').addEventListener('click',share);
  $('hold-btn').addEventListener('click',hold);
  $('help').addEventListener('click',()=>{if(status==='playing')togglePause();toast('TAP TURN · SWIPE MOVE · DOWN DROP');});
